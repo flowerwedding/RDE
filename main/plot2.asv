@@ -1,0 +1,409 @@
+%% 风电场布局多算法对比绘图
+% 复现论文图6：四种风向角度下的布局对比
+% 算法顺序：HHWOA, CGPSO, BDE, RDE
+% 风向角度：28°, 128°, 144°, 183°
+
+clear; clc; close all;
+
+%% 路径设置
+base_path = 'D:\MatlabProjects\BDE-WindFarm_code\code\Results';
+algorithms = {'20260424HHWOA', '20260424CGPSO', '20260424BDE', '20260424RDE'};
+algo_names = {'HHWOA', 'CGPSO', 'BDE', 'RDE'};
+wind_scenario = '6speed_12direction';
+tn = 30;
+NA_type = 0;
+
+%% 风向角度
+wind_angles = [28, 128, 144, 183]; % 四个风向角度
+n_angles = length(wind_angles);
+n_algorithms = length(algorithms);
+
+%% 风电场参数
+rows = 21;
+cols = 21;
+cell_width = 77 * 3; % 231 m
+farm_width = cols * cell_width;
+farm_height = rows * cell_width;
+
+%% 读取数据并绘图
+figure('Position', [100, 100, 1800, 1200]);
+set(gcf, 'Color', 'white');
+
+% 用于存储每个算法的最佳布局（从最后一代选取）
+best_layouts = cell(n_algorithms, 1);
+
+for algo_idx = 1:n_algorithms
+    % 读取farmlayoutNA文件
+    folder = fullfile(base_path, algorithms{algo_idx}, wind_scenario, ...
+                      sprintf('tn%d_NA%d', tn, NA_type));
+    
+    % 查找farmlayoutNA文件
+    layout_files = dir(fullfile(folder, 'farmlayoutNA*.mat'));
+    
+    if isempty(layout_files)
+        warning('未找到文件: %s', folder);
+        continue;
+    end
+    
+    % 读取最后一个运行的文件
+    load(fullfile(folder, layout_files(end).name));
+    
+    % 获取最后一代的布局
+    if exist('farmlayout_NA', 'var')
+        % farmlayout_NA维度: [runTime, max_it, N_cells]
+        best_layouts{algo_idx} = squeeze(farmlayout_NA(end, end, :));
+    elseif exist('farmlayoutNA', 'var')
+        best_layouts{algo_idx} = squeeze(farmlayoutNA(end, end, :));
+    end
+end
+
+%% 为每个角度生成布局图
+for angle_idx = 1:n_angles
+    wind_angle = wind_angles(angle_idx);
+    
+    for algo_idx = 1:n_algorithms
+        % 使用修正后的subplot_tight
+        subplot_tight(n_angles, n_algorithms, (angle_idx-1)*n_algorithms + algo_idx);
+        
+        layout_vector = best_layouts{algo_idx};
+        
+        if isempty(layout_vector)
+            continue;
+        end
+        
+        % 转换为2D坐标
+        [turbine_positions, wind_speed_grid] = layout_to_positions_with_wake(...
+            layout_vector, rows, cols, cell_width, wind_angle);
+        
+        % 绘制风电场布局
+        plot_wind_farm_layout(turbine_positions, wind_speed_grid, ...
+                             farm_width, farm_height, wind_angle);
+        
+        % 添加算法标签（仅第一列）
+        if angle_idx == 1
+            text(-150, farm_height/2, algo_names{algo_idx}, ...
+                 'HorizontalAlignment', 'right', 'VerticalAlignment', 'middle', ...
+                 'FontSize', 12, 'FontWeight', 'bold', 'FontName', 'Arial');
+        end
+        
+        % 添加风向角度标签（仅第一行）
+        if algo_idx == 1
+            title(sprintf('%d°', wind_angle), 'FontSize', 14, 'FontWeight', 'bold');
+        end
+        
+        % 添加坐标系
+        if algo_idx == n_algorithms && angle_idx == n_angles
+            xlabel('x (m)', 'FontSize', 10);
+            ylabel('y (m)', 'FontSize', 10);
+        elseif angle_idx == n_angles
+            xlabel('x (m)', 'FontSize', 10);
+        elseif algo_idx == 1
+            ylabel('y (m)', 'FontSize', 10);
+        end
+    end
+end
+
+%% 添加总标题
+sgtitle('风电场布局对比 - 不同风向角度下四种算法性能', ...
+        'FontSize', 16, 'FontWeight', 'bold');
+
+%% 保存图片
+saveas(gcf, fullfile(base_path, 'comparison_wind_farm_layouts.png'));
+saveas(gcf, fullfile(base_path, 'comparison_wind_farm_layouts.fig'));
+
+fprintf('绘图完成！图片已保存至: %s\n', base_path);
+
+%% ==================== 辅助函数 ====================
+
+function subplot_tight(m, n, p)
+% 紧凑子图函数（简化版）
+% 输入: m - 子图行数, n - 子图列数, p - 当前子图索引
+    
+    % 设置边距和间距
+    left_margin = 0.08;
+    right_margin = 0.03;
+    top_margin = 0.05;
+    bottom_margin = 0.08;
+    gap_x = 0.04;
+    gap_y = 0.04;
+    
+    % 计算每个子图的宽度和高度
+    width = (1 - left_margin - right_margin - (n-1)*gap_x) / n;
+    height = (1 - top_margin - bottom_margin - (m-1)*gap_y) / m;
+    
+    % 计算当前子图的行和列
+    row = ceil(p / n);
+    col = mod(p-1, n) + 1;
+    
+    % 计算位置
+    x = left_margin + (col-1)*(width + gap_x);
+    y = 1 - top_margin - row*(height + gap_y);
+    
+    % 创建子图
+    subplot('Position', [x, y, width, height]);
+end
+
+function [turbine_positions, wind_speed_grid] = layout_to_positions_with_wake(...
+    layout_vector, rows, cols, cell_width, wind_angle)
+% 将布局向量转换为风机位置和考虑尾流效应的风速网格
+%
+% 输入:
+%   layout_vector - 布局向量 (1 x N_cells)
+%   rows, cols - 网格行数和列数
+%   cell_width - 网格单元宽度 (m)
+%   wind_angle - 风向角度 (度)
+% 输出:
+%   turbine_positions - 风机位置 [N_turbines x 2]
+%   wind_speed_grid - 考虑尾流的风速网格 (rows x cols)
+
+    N_cells = rows * cols;
+    wind_speed_grid = ones(rows, cols); % 初始化为1（归一化风速）
+    
+    % 找到风机位置
+    turbine_indices = find(layout_vector == 1);
+    N_turbines = length(turbine_indices);
+    
+    if N_turbines == 0
+        turbine_positions = [];
+        return;
+    end
+    
+    % 转换为2D坐标
+    turbine_positions = zeros(N_turbines, 2);
+    for i = 1:N_turbines
+        idx = turbine_indices(i);
+        row = ceil(idx / cols);
+        col = mod(idx-1, cols) + 1;
+        
+        % 网格中心坐标
+        x = (col - 0.5) * cell_width;
+        y = (rows - row + 0.5) * cell_width;
+        
+        turbine_positions(i, :) = [x, y];
+    end
+    
+    % 考虑尾流效应计算风速
+    % 参数设置
+    rotor_radius = 77 / 2; % 风轮半径 (m)
+    hub_height = 80; % 轮毂高度 (m)
+    surface_roughness = 0.00025; % 地面粗糙度 (m)
+    
+    % 计算尾流衰减常数
+    alpha = 0.5 / log(hub_height / surface_roughness);
+    
+    % 将风向转换为弧度
+    wind_rad = deg2rad(wind_angle);
+    wind_dir = [cos(wind_rad), sin(wind_rad)];
+    
+    % 按风向排序风机（上游到下游）
+    [~, sorted_idx] = sort(turbine_positions * wind_dir', 'ascend');
+    sorted_turbines = turbine_positions(sorted_idx, :);
+    sorted_indices = turbine_indices(sorted_idx);
+    
+    % 计算每个风机的风速
+    turbine_wind_speed = ones(N_turbines, 1); % 初始风速归一化为1
+    
+    for i = 1:N_turbines
+        for j = 1:i-1
+            % 计算两风机连线向量
+            vec = sorted_turbines(i, :) - sorted_turbines(j, :);
+            
+            % 计算投影距离（沿风向）
+            proj_dist = vec * wind_dir';
+            
+            if proj_dist > 0
+                % 计算垂直距离
+                perp_dist = abs(vec(1)*wind_dir(2) - vec(2)*wind_dir(1));
+                
+                % 尾流半径
+                wake_radius = rotor_radius + alpha * proj_dist;
+                
+                if perp_dist <= wake_radius
+                    % 计算尾流效应
+                    wake_deficit = 2/3 * (rotor_radius / (rotor_radius + alpha * proj_dist))^2;
+                    
+                    % 计算重叠面积比例
+                    overlap_ratio = calculate_overlap_ratio(rotor_radius, wake_radius, perp_dist);
+                    
+                    % 组合尾流效应
+                    turbine_wind_speed(i) = turbine_wind_speed(i) * ...
+                        (1 - wake_deficit * overlap_ratio);
+                end
+            end
+        end
+    end
+    
+    % 计算每个网格点的风速（用于可视化）
+    wind_speed_grid = calculate_grid_wind_speed(rows, cols, cell_width, ...
+        sorted_turbines, sorted_indices, turbine_wind_speed, wind_dir, rotor_radius, alpha);
+end
+
+function wind_speed_grid = calculate_grid_wind_speed(rows, cols, cell_width, ...
+    turbine_positions, turbine_indices, turbine_wind_speed, wind_dir, rotor_radius, alpha)
+% 计算每个网格点的风速
+
+    wind_speed_grid = ones(rows, cols);
+    N_turbines = size(turbine_positions, 1);
+    
+    if N_turbines == 0
+        return;
+    end
+    
+    % 创建细粒度网格用于平滑显示
+    fine_scale = 3;
+    fine_rows = rows * fine_scale;
+    fine_cols = cols * fine_scale;
+    fine_cell_width = cell_width / fine_scale;
+    
+    fine_grid = ones(fine_rows, fine_cols);
+    
+    % 计算每个细粒度网格点的风速
+    for x = 1:fine_cols
+        for y = 1:fine_rows
+            point_x = (x - 0.5) * fine_cell_width;
+            point_y = (y - 0.5) * fine_cell_width;
+            point = [point_x, point_y];
+            wind_speed = 1.0;
+            
+            for i = 1:N_turbines
+                vec = point - turbine_positions(i, :);
+                proj_dist = vec * wind_dir';
+                
+                if proj_dist > 0
+                    perp_dist = abs(vec(1)*wind_dir(2) - vec(2)*wind_dir(1));
+                    wake_radius = rotor_radius + alpha * proj_dist;
+                    
+                    if perp_dist <= wake_radius
+                        wake_deficit = 2/3 * (rotor_radius / (rotor_radius + alpha * proj_dist))^2;
+                        
+                        % 计算重叠比例（高斯分布）
+                        overlap_ratio = exp(-(perp_dist^2) / (2 * wake_radius^2));
+                        
+                        wind_speed = wind_speed * (1 - wake_deficit * overlap_ratio);
+                    end
+                end
+            end
+            
+            fine_grid(y, x) = wind_speed;
+        end
+    end
+    
+    % 下采样回原始网格
+    for i = 1:rows
+        for j = 1:cols
+            y_range = (i-1)*fine_scale+1 : min(i*fine_scale, fine_rows);
+            x_range = (j-1)*fine_scale+1 : min(j*fine_scale, fine_cols);
+            wind_speed_grid(i, j) = mean(mean(fine_grid(y_range, x_range)));
+        end
+    end
+    
+    % 在风机位置设置准确的风速值
+    for i = 1:N_turbines
+        idx = turbine_indices(i);
+        row = ceil(idx / fine_cols * fine_scale);
+        col = mod(idx-1, fine_cols * fine_scale / cols) + 1;
+        if row <= rows && col <= cols
+            wind_speed_grid(row, col) = turbine_wind_speed(i);
+        end
+    end
+end
+
+function overlap_ratio = calculate_overlap_ratio(r1, r2, d)
+% 计算两圆重叠面积比例
+    if d >= r1 + r2
+        overlap_ratio = 0;
+    elseif d <= abs(r1 - r2)
+        overlap_ratio = 1;
+    else
+        % 计算重叠面积
+        a1 = 2 * acos((d^2 + r1^2 - r2^2) / (2 * d * r1));
+        a2 = 2 * acos((d^2 + r2^2 - r1^2) / (2 * d * r2));
+        
+        area1 = 0.5 * r1^2 * (a1 - sin(a1));
+        area2 = 0.5 * r2^2 * (a2 - sin(a2));
+        
+        overlap_area = area1 + area2;
+        overlap_ratio = overlap_area / (pi * r1^2);
+    end
+end
+
+function plot_wind_farm_layout(turbine_positions, wind_speed_grid, farm_width, farm_height, wind_angle)
+% 绘制风电场布局图
+%
+% 输入:
+%   turbine_positions - 风机位置 [N_turbines x 2]
+%   wind_speed_grid - 风速网格 (rows x cols)
+%   farm_width, farm_height - 风电场尺寸
+%   wind_angle - 风向角度
+
+    if isempty(turbine_positions)
+        return;
+    end
+    
+    % 创建网格坐标
+    [rows, cols] = size(wind_speed_grid);
+    cell_width = farm_width / cols;
+    cell_height = farm_height / rows;
+    
+    [X, Y] = meshgrid(0:cell_width:farm_width, 0:cell_height:farm_height);
+    
+    % 扩展风速网格用于绘图
+    if rows > 1 && cols > 1
+        wind_speed_expanded = imresize(wind_speed_grid, [size(X,1)-1, size(X,2)-1], 'bilinear');
+        wind_speed_expanded = max(0.5, min(1, wind_speed_expanded));
+        
+        % 绘制风速背景
+        pcolor(X, Y, wind_speed_expanded);
+        shading interp;
+    else
+        pcolor(X, Y, ones(size(X)));
+        shading interp;
+    end
+    
+    % 设置颜色映射（红到黄，表示低到高风速）
+    colormap(flipud(hot));
+    
+    caxis([0.6, 1.0]); % 设置颜色范围
+    
+    hold on;
+    
+    % 绘制风机（黑色圆点）
+    if ~isempty(turbine_positions)
+        scatter(turbine_positions(:,1), turbine_positions(:,2), 40, 'k', 'filled', 'MarkerEdgeColor', 'w', 'LineWidth', 0.5);
+    end
+    
+    % 绘制风向箭头
+    arrow_length = farm_width * 0.12;
+    arrow_start_x = farm_width * 0.85;
+    arrow_start_y = farm_height * 0.9;
+    
+    wind_rad = deg2rad(wind_angle);
+    arrow_end_x = arrow_start_x + arrow_length * cos(wind_rad);
+    arrow_end_y = arrow_start_y + arrow_length * sin(wind_rad);
+    
+    quiver(arrow_start_x, arrow_start_y, arrow_end_x-arrow_start_x, ...
+           arrow_end_y-arrow_start_y, 0, 'LineWidth', 2, 'Color', 'k', 'MaxHeadSize', 0.3);
+    
+    % 添加风向文字
+    text(arrow_start_x + arrow_length*1.2*cos(wind_rad), ...
+         arrow_start_y + arrow_length*1.2*sin(wind_rad), ...
+         sprintf('%d°', wind_angle), 'FontSize', 9, 'FontWeight', 'bold', ...
+         'HorizontalAlignment', 'center');
+    
+    % 设置坐标轴
+    xlim([0, farm_width]);
+    ylim([0, farm_height]);
+    axis equal tight;
+    set(gca, 'FontSize', 9);
+    set(gca, 'XTick', [0, farm_width/2, farm_width]);
+    set(gca, 'YTick', [0, farm_height/2, farm_height]);
+    set(gca, 'XTickLabel', {'0', sprintf('%.0f', farm_width/2), sprintf('%.0f', farm_width)});
+    set(gca, 'YTickLabel', {'0', sprintf('%.0f', farm_height/2), sprintf('%.0f', farm_height)});
+    
+    % 添加网格线
+    grid on;
+    set(gca, 'GridAlpha', 0.2);
+    set(gca, 'GridLineStyle', ':');
+    
+    hold off;
+end

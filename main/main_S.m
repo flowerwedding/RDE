@@ -1,0 +1,107 @@
+% clear;
+clc;
+tic;
+format long
+%% path setup
+problem_path = '../WindFarmOptimization/';
+ws_path =  '../WindFarmOptimization/windscenarios';
+save_path = '../Results/';
+addpath(problem_path)
+addpath(ws_path)
+
+%% experiment setup
+runTime = 3; % 21
+popsize = 50;
+max_it  = 400;
+
+%% wind farm parameters
+rows = 21;
+cols = 21;
+cell_width= 77.0 * 3;
+%% 3种风机规模
+% turbine_num = [30,35,40, ];%风力发电机组的规模
+turbine_num = [30];
+NA_type_list = 0;
+
+%% 4种风电场场景wind scenarios
+n_speeds = [3,3,4,6];%风速数量
+n_directions = [12,12,12,12];%风向数量
+unifrom = [0,1,0,0];%是否均匀分布
+
+%% Para
+% 并行计算设置 parpool('threads')
+delete(gcp('nocreate'))
+mycluster = parcluster('local');
+mycluster.NumWorkers = 20;
+
+cls_type = 3; % 聚类类型 1:individual 2d;  2: population 2D; 3:population 1D
+c_r_type = 3 ; % 交叉类型 1:x 2:y 3:x&y
+rad_value  = (0.01); % 半径值
+for rad_ind = 1:length(rad_value) % 遍历不同半径值，只有一个0.1
+    for Strategy = 3
+        total_st=tic;
+        rad_value_temp = rad_value(rad_ind); % 生成算法目录名称
+        algorithmDir = sprintf('20260424RDE');
+
+        text_path = sprintf('%s/%s/',save_path,algorithmDir); % 创建保存目录和文件
+        text_file = sprintf('%s/cost_time.txt',text_path);
+        if ~exist(text_path,'dir')
+            mkdir(text_path)
+        end
+        f = fopen(text_file,'a');
+        fprintf(f, datestr(now));
+        fprintf(f,'\n');
+
+        for wt =+1:length(n_speeds) % 三层嵌套循环：风场景 × 风机规模 × 禁止区域类型
+            for tn = turbine_num
+                for NA_type = NA_type_list % 只有0
+                    NA_loc_array = gene_NA_loc(NA_type); % 生成禁止区域位置
+                    [wf,ws_folder] = gene_windfram(rows,cols,tn,cell_width,NA_loc_array,n_speeds(wt),n_directions(wt),unifrom(wt)); % 生成风电场结构和风场景数据
+                    save('wf.mat', 'wf');
+                    folder = sprintf('%s/%s/%s/tn%d_NA%d',save_path,algorithmDir,ws_folder,tn, NA_type);
+
+                    if ~exist(folder,'dir')
+                        mkdir(folder)
+                    end
+
+                    eta=zeros(max_it,runTime); % 转换效率
+                    fitness = zeros(max_it,runTime); % 适应度
+
+                    farmlayout= zeros(runTime,max_it,wf.cols*wf.rows); % 风电场布局
+                    farmlayout_NA= zeros(runTime,max_it,wf.cols*wf.rows); % 带禁止区域的风电场布局
+                    fprintf('%s - %s TN %d\n',algorithmDir,ws_folder,tn)
+                    for t=1:runTime % 运行51次
+                        if t == 30
+                            fprintf('\n')
+                        end
+                        st=tic;
+                        [Fbest, BestChart, BestFitness, farmlayout(t,:,:), farmlayout_NA(t,:,:)] = RDE2(popsize,wf,max_it,NA_type,tn,ws_folder,t);
+                        % [Fbest, BestChart, BestFitness, farmlayout(t,:,:), farmlayout_NA(t,:,:)] = ACDDE(popsize, wf, max_it, NA_type, tn, ws_folder, t);
+                        end_t = toc(st);
+                        cost_t = seconds(end_t);
+                        cost_t.Format = 'hh:mm:ss';
+                        eta(:,t) = BestChart;
+                        fitness(:,t) = BestFitness;
+                        %% 保存和输出
+                        save_results(reshape(farmlayout(t,:,:),size(farmlayout(t,:,:),2),size(farmlayout_NA(t,:,:),3)),reshape(farmlayout_NA(t,:,:),size(farmlayout_NA(t,:,:),2),size(farmlayout(t,:,:),3)),t,folder)
+                        save(sprintf('%s/eta.mat',folder),"eta")
+                        save(sprintf('%s/fitness.mat',folder),"fitness")
+                        fprintf('\n%s - %s TN %d Cost Times %s\n',algorithmDir,ws_folder,tn,cost_t);   
+                    end
+                    fprintf("min eta = %f\n",min(eta(end, :)));
+                    fprintf("max eta = %f\n",max(eta(end, :)));
+                    fprintf("median eta = %f\n",median(eta(end, :)));
+                    fprintf("mean eta = %f\n",mean(eta(end, :)));
+                    fprintf("std eta = %f\n",std(eta(end, :)));
+                end
+
+            end
+        end
+        %% 记录时间
+        total_cost = toc(total_st);
+        total_cost_t = seconds(total_cost);
+        total_cost_t.Format = 'hh:mm:ss';
+        fprintf(f,'Total cost: %s\n',total_cost_t);
+        fclose(f);
+    end
+end
